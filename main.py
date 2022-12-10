@@ -312,18 +312,23 @@ async def download_sliced_matrix():
 
 
 @app.get("/shapeComplexity")
-async def get_shape_complexity():
+async def get_shape_complexity(weight: float):
     """_summary_
 
     Returns:
         _type_: _description_
     """
+    print(weight)
     comp1 = None
     comp2 = None
     comp1 = calc.calculate_shape_complexity("./outerImages_ESCM.xlsx")
     comp2 = calc.calculate_shape_complexity("./slicedImages_LCM.xlsx")
-    comb = 0.5 * comp1 + 0.5 * comp2
+    comb = comp1 * weight + comp2 * weight
     delete_file("./outerImages_ESCM.xlsx")
     delete_file("./slicedImages_LCM.xlsx")
-    data = {"OuterImage": comp1, "SlicedImage": comp2, "combined": comb}
+    message = "Selected for redesign"
+    if comp2 >= 1 or comb >= 4:
+        message = "Design can be selected for AM"
+    data = {"OuterImage": round(comp1, 4), "SlicedImage": round(
+        comp2, 4), "combined": round(comb, 4), "Message": message}
     return data
