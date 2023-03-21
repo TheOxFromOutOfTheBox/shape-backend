@@ -1,11 +1,11 @@
 """
     This is the main file of stl_viewer backend module.
 """
-import os
+import os,json
 import math
 import time
 import trimesh
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, UploadFile,File,Request
 from stl import mesh
 from mpl_toolkits import mplot3d
 from matplotlib import pyplot
@@ -17,10 +17,16 @@ import numpy as np
 import cv2
 import xlsxwriter
 from CalculateComplexity import CalculateComplexity
+import networkx as nx
+import pandas as pd
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+import multipart
+from io import BytesIO
 
 origins = [
-    "http://localhost",
-    "http://localhost:4001",
+    "http://127.0.0.1",
+    "http://127.0.0.1:4001",
 ]
 
 app = FastAPI()
@@ -32,7 +38,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 DESTINATION = "/"
 CHUNK_SIZE = 2 ** 20  # 1MB
@@ -335,3 +340,160 @@ async def get_shape_complexity(internalWeightage: float, externalWeightage: floa
     data = {"OuterImage": round(comp1, 4), "SlicedImage": round(
         comp2, 4), "combined": round(comb, 4), "Message": message}
     return data
+
+
+@app.post("/getWeights")
+
+async def getWeights(file:UploadFile=File(...)):
+
+    print(file)
+    contents = await file.read()
+    print(contents)
+    # print(file.filename)
+    # df = pd.read_csv('steering.csv')
+    df = pd.read_csv(BytesIO(contents))
+    print(df)
+    Graphtype = nx.Graph()
+    G = nx.from_pandas_edgelist(df, edge_attr='weight', create_using=Graphtype)
+    nx.draw(G, with_labels=True)
+
+    node = nx.degree_centrality(G)
+    return JSONResponse(content=jsonable_encoder(node))
+
+# cost_mat,material_density,support_vol,num_layers
+def support_cost_calc(cost_mat,material_density,support_vol,num_layers):
+    des_time=1 # hr
+    wage_des_engr=27 # $/hr
+    avg_incidental_wage=33.91 # $/hr
+
+    equ_usage_time=1 # hr
+    sw_license_cost=8822 # $/annum
+    des_sw_util= 2628 # hrs/annum
+    hw_investment_cost=980 # $
+    hw_util=6570 # hrs/annum
+    hw_amor_period= 3 #yrs
+
+    office_area=3 #m^2
+    office_util= 5256 # hrs/annum
+    avg_rent_office=14.6 # $/m^2
+    avg_op_cost_office=3.05 # $/m^2
+
+    cost_stress=350 # $
+    cost_EDM=200 # $
+    time_post_proc=2 # hrs
+    cost_operator=110 # $/hr
+    cost_tools=50 # $
+    # material_density=4410 # modifiable param
+    # cost_mat=680 # modifiable param
+    cost_scrap=5 # $/kg
+    # support_vol=1 # modifiable param
+    # num_layer=1 # modifiable param
+    hatch_spacing=0.15 #mm
+    layer_thickness=0.03 #mm
+    offset_height_support=2 #mm
+    recoating_time=10 #sec
+    delay_time=2 #sec
+    cost_gas_filter_machine_invest=328 # $
+    machine_util=4380 #hrs/annum
+    machine_filter_amor_period=5 #yrs
+    cost_gas=4.9 #$
+    cost_energy=1.54 #$
+    machine_cost=490100 #$
+    machine_amor_period=5 #yrs
+    machine_area=12.6 #m^2
+    avg_machine_space_rent=14.6 #$/m^2
+    avg_machine_space_op_cost=3.05 #$/m^2
+    machine_service_cost=29406 #$/annum
+
+    cost_op_des=des_time*(wage_des_engr+avg_incidental_wage)
+    # print('cost-op-des',cost_op_des)
+    cost_equipment_des= (equ_usage_time*sw_license_cost/des_sw_util)+((equ_usage_time*hw_investment_cost)/(hw_util*hw_amor_period))
+    # print('cost equ des',cost_equipment_des)
+    cost_office_space_des=(equ_usage_time*office_area/office_util)*(avg_rent_office+avg_op_cost_office)
+    cost_design_support=cost_op_des+cost_equipment_des+cost_office_space_des
+
+    print('material density',material_density)
+    cost_material=material_density*support_vol*(cost_mat-cost_scrap) # whats support_vol??
+    # print('cost office',cost_design_support)
+    build_speed=500 #mm/sec
+    melt_rate=build_speed*hatch_spacing*layer_thickness*3.6# whats nl??
+    build_time=(support_vol/melt_rate)+((offset_height_support/layer_thickness)*(recoating_time+delay_time)/3600)
+    cost_prod=(build_time/machine_util)*((machine_cost/machine_amor_period)+(machine_area*(avg_machine_space_rent+avg_machine_space_op_cost))+machine_service_cost)
+    cost_gas_filter=(build_time*cost_gas_filter_machine_invest)/(machine_util*machine_filter_amor_period)
+    cost_post_proc_gas=build_time*cost_gas
+    cost_energy_total=build_time*cost_energy
+    cost_manu_support=cost_material+cost_prod+cost_gas_filter+cost_post_proc_gas+cost_energy_total
+
+    cost_substrate=cost_stress+cost_EDM
+    cost_post_proc=time_post_proc*(cost_operator+cost_tools)
+    cost_post_proc_support=cost_substrate+cost_post_proc
+    print('ehllo',cost_prod)
+
+    cost_proc_support=cost_design_support+cost_manu_support+cost_post_proc_support
+
+    return cost_proc_support
+
+
+# part_vol,support_vol,num_layers
+def proc_cost_calc(part_vol,support_vol,num_layers,material,material_cost):
+    print(material)
+    wrought_density={'ti64':4.41,'ss':7.8,'in625':5}
+    tap_density={'ti64':2.74,'ss':5.3,'in625':5}
+    build_rate=13.5/60 # min/cm^3
+    time_setup=2 #hr
+    recoat_rate=9 #sec/layer
+    cost_am_machine=60 #$/hr
+    cost_gas=10 #$/hr
+    operator_rate=110 #$/hr
+    unit_cost_mat=material_cost #$/kg
+    time_removal=3 #hr
+    powder_wrought_density=wrought_density[material] #g/cm^3
+    powder_tap_density=tap_density[material] #g/cm^3
+    # where to get these values from
+    # part_vol=1 
+    # support_vol=1
+    # num_layers=1
+    print('unit cost mat',unit_cost_mat)
+    time_recoat=recoat_rate*num_layers/3600
+    build_time=build_rate*(part_vol+support_vol)+time_recoat
+    print('part vol',part_vol)
+    print('supp vol',support_vol)
+    print('build time',build_time)
+    cost_operation=build_time*(cost_am_machine+cost_gas)
+    cost_setup=time_setup*(cost_am_machine+operator_rate)
+    mass=(1.4*powder_wrought_density*(part_vol+support_vol))+(0.25*powder_tap_density*support_vol)
+    cost_mat=mass*unit_cost_mat
+    cost_removal=time_removal*(cost_am_machine+operator_rate) 
+    cost_proc=cost_mat+cost_setup+cost_operation+cost_removal
+    print(cost_mat,cost_removal,cost_setup,cost_operation)
+    return cost_proc
+
+@app.post('/costCalc')
+async def costCalc(request: Request):   
+    json_data = await request.body()
+    a=BytesIO(json_data)
+    data=json.loads(a.getvalue())
+    
+    material_id=['ti64','ss','in625']
+    cost_proc=proc_cost_calc(part_vol=data['part_volume'],support_vol=data['support_volume'],num_layers=data['num_layers'],material=material_id[data['material']-1],material_cost=data['material_cost']/1000)
+    cost_support=support_cost_calc(support_vol=data['support_volume'],num_layers=data['num_layers'],cost_mat=data['material_cost']/1000,material_density=data['material_density'])
+    return {"cost_proc":round(cost_proc,2),"cost_support":round(cost_support,2)}
+
+
+@app.post('/multFile')
+async def multFiles(request: Request):
+    print(request)
+    return {'message':'success'}
+# async def multFiles(single_file: UploadFile = File(...), multiple_files= File(default=[])):
+#     # Read the contents of the single STL file
+#     single_file_contents = await single_file.read()
+
+#     # Read the contents of each of the multiple STL files
+#     multiple_file_contents = []
+#     for file in multiple_files:
+#         file_contents = await file.read()
+#         multiple_file_contents.append(file_contents)
+
+#     print(single_file_contents)
+
+#     return {'message':'success'}
