@@ -5,7 +5,7 @@ import os,json
 import math
 import time
 import trimesh
-from fastapi import FastAPI, UploadFile,File,Request
+from fastapi import FastAPI, UploadFile,File,Form,Request
 from stl import mesh
 from mpl_toolkits import mplot3d
 from matplotlib import pyplot
@@ -22,7 +22,10 @@ import pandas as pd
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 import multipart
+from typing import List
 from io import BytesIO
+
+from alcoa import alcoa
 
 origins = [
     "http://127.0.0.1",
@@ -41,6 +44,7 @@ app.add_middleware(
 
 DESTINATION = "/"
 CHUNK_SIZE = 2 ** 20  # 1MB
+layer_thickness=0.03 #mm
 
 
 async def chunked_copy(src, dst):
@@ -389,7 +393,7 @@ def support_cost_calc(cost_mat,material_density,support_vol,num_layers):
     # support_vol=1 # modifiable param
     # num_layer=1 # modifiable param
     hatch_spacing=0.15 #mm
-    layer_thickness=0.03 #mm
+    
     offset_height_support=2 #mm
     recoating_time=10 #sec
     delay_time=2 #sec
@@ -431,7 +435,7 @@ def support_cost_calc(cost_mat,material_density,support_vol,num_layers):
 
     cost_proc_support=cost_design_support+cost_manu_support+cost_post_proc_support
 
-    return cost_proc_support
+    return round(cost_proc_support,2)
 
 
 # part_vol,support_vol,num_layers
@@ -466,7 +470,7 @@ def proc_cost_calc(part_vol,support_vol,num_layers,material,material_cost):
     cost_removal=time_removal*(cost_am_machine+operator_rate) 
     cost_proc=cost_mat+cost_setup+cost_operation+cost_removal
     print(cost_mat,cost_removal,cost_setup,cost_operation)
-    return cost_proc
+    return round(cost_proc,2)
 
 @app.post('/costCalc')
 async def costCalc(request: Request):   
@@ -480,20 +484,103 @@ async def costCalc(request: Request):
     return {"cost_proc":round(cost_proc,2),"cost_support":round(cost_support,2)}
 
 
+
+# External Images Complexity Metric: 
+# Sliced Images Complexity Metric: 
 @app.post('/multFile')
-async def multFiles(request: Request):
-    print(request)
-    return {'message':'success'}
-# async def multFiles(single_file: UploadFile = File(...), multiple_files= File(default=[])):
-#     # Read the contents of the single STL file
-#     single_file_contents = await single_file.read()
+async def multFiles(single_file: UploadFile = File(...), multiple_files: List[UploadFile] = File(...),material:str=Form(...),material_cost:str=Form(...),material_density:str=Form(...)):
+    # json_data = await request.body()
+    # a=BytesIO(json_data)
+    # data=json.loads(a.getvalue())
+    print(material)
+    # Read the contents of the single STL file
+    single_file_contents = await single_file.read()
 
 #     # Read the contents of each of the multiple STL files
-#     multiple_file_contents = []
-#     for file in multiple_files:
-#         file_contents = await file.read()
-#         multiple_file_contents.append(file_contents)
+    multiple_file_contents = []
+    for file in multiple_files:
+        file_contents = await file.read()
+        multiple_file_contents.append(file_contents)
+    material_id=['ti64','ss','in625']
+    # print(single_file_contents)
+    file_location = f"uploads/{single_file.filename}"
+    with open(file_location, "wb") as file_object:
+        file_object.write(single_file_contents)
+    model_height=getHeight(file_location)
+    g=getPartVol(file_location)
+    print(g)
+    single={}
 
-#     print(single_file_contents)
+    single["cost_proc"]=proc_cost_calc(part_vol=g,support_vol=1,num_layers=model_height/layer_thickness,material_cost=float(material_cost)/1000,material=material_id[int(material)])
+    single["cost_support"]=support_cost_calc(cost_mat=float(material_cost)/1000,material_density=float(material_density),support_vol=1,num_layers=model_height/layer_thickness)
 
-#     return {'message':'success'}
+    print(len(multiple_file_contents))
+    final_data=[]
+    for i in range(0,len(multiple_file_contents),5):
+        print(f"WE in {i}")
+        file_location = f"uploads/{multiple_files[i].filename}"
+        with open(file_location, "wb") as file_object:
+            file_object.write(multiple_file_contents[i])
+        model_height=getHeight(file_location)
+        g=getPartVol(file_location)
+        print(g)
+        a= await generate_images(multiple_files[i])
+        print(a)
+        b= await generate_sliced_images(multiple_files[i],"X",1)
+        print(b)
+        c=await get_outer_matrix()
+        print(c)
+        d=await get_sliced_matrix(b['count'])
+        print(d)
+        e=await get_shape_complexity(internalWeightage=0.5,externalWeightage=0.5)
+        print(e)
+        e["cost_proc"]=proc_cost_calc(part_vol=g,support_vol=1,num_layers=model_height/layer_thickness,material_cost=float(material_cost)/1000,material=material_id[int(material)])
+        e["cost_support"]=support_cost_calc(cost_mat=float(material_cost)/1000,material_density=float(material_density),support_vol=1,num_layers=model_height/layer_thickness)
+        final_data.append(e)
+
+    return {'message':'success',"data":{"multiple":final_data,"single":single},"status":200}
+
+def find_mins_maxs(obj):
+    minx = obj.x.min()
+    maxx = obj.x.max()
+    miny = obj.y.min()
+    maxy = obj.y.max()
+    minz = obj.z.min()
+    maxz = obj.z.max()
+    return minx, maxx, miny, maxy, minz, maxz
+
+def getHeight(filepath):
+    # print(filepath)
+    main_body = mesh.Mesh.from_file(filepath)
+    print(find_mins_maxs(main_body))
+    minx, maxx, miny, maxy, minz, maxz = find_mins_maxs(main_body)
+    w1 = maxx - minx
+    l1 = maxy - miny
+    h1 = maxz - minz
+    return h1
+
+def getPartVol(filepath):
+    my_mesh = trimesh.load(filepath)
+    vol = my_mesh.volume
+
+    cmvol = vol/1000
+    return cmvol
+
+@app.post('/rankJava')
+async def rankJavaCode(data:dict):
+    # json_data = await request.body()
+    # # print(json_data)
+    # a=BytesIO(json_data)
+    # print(a)
+    # data=json.load(a)
+    # print(data)
+    escm = data.get('escm', [])
+    lcm = data.get('lcm', [])
+    cbr = data.get('cbr', [])
+    ic = data.get('ic', [])
+    print(escm)
+    print(lcm)
+    print(cbr)
+    print(ic)
+    alcoa(escm,lcm,cbr,ic)
+    return {"message":"success","status":200}
